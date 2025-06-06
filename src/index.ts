@@ -1,643 +1,554 @@
 #!/usr/bin/env node
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+// src/index.ts - Modified to export server creation function
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-  ErrorCode,
-  McpError,
-} from "@modelcontextprotocol/sdk/types.js";
-import axios, { AxiosInstance } from "axios";
-import { FieldOption, fieldRequiresOptions, getDefaultOptions, FieldType } from "./types.js";
+  Tool,
+} from '@modelcontextprotocol/sdk/types.js';
+import axios from 'axios';
 
-const API_KEY = process.env.AIRTABLE_API_KEY;
-if (!API_KEY) {
-  throw new Error("AIRTABLE_API_KEY environment variable is required");
+// Airtable field color options
+const FIELD_COLORS = [
+  'blueBright', 'redBright', 'greenBright',
+  'yellowBright', 'purpleBright', 'pinkBright',
+  'grayBright', 'cyanBright', 'orangeBright',
+  'blueDark1', 'greenDark1'
+] as const;
+
+type FieldColor = typeof FIELD_COLORS[number];
+
+// Airtable field types
+interface AirtableFieldConfig {
+  type: string;
+  options?: {
+    precision?: number;
+    symbol?: string;
+    dateFormat?: { name: string; format: string };
+    choices?: Array<{ name: string; color?: FieldColor }>;
+  };
 }
 
-class AirtableServer {
-  private server: Server;
-  private axiosInstance: AxiosInstance;
+// API configuration
+const AIRTABLE_API_BASE = 'https://api.airtable.com/v0';
 
-  constructor() {
-    this.server = new Server(
-      {
-        name: "airtable-server",
-        version: "0.2.0",
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
+class AirtableAPIError extends Error {
+  constructor(message: string, public statusCode?: number, public details?: any) {
+    super(message);
+    this.name = 'AirtableAPIError';
+  }
+}
 
-    this.axiosInstance = axios.create({
-      baseURL: "https://api.airtable.com/v0",
-      headers: {
-        Authorization: `Bearer ${API_KEY}`,
-      },
-    });
-
-    this.setupToolHandlers();
-    
-    // Error handling
-    this.server.onerror = (error) => console.error("[MCP Error]", error);
-    process.on("SIGINT", async () => {
-      await this.server.close();
-      process.exit(0);
-    });
+// Helper function to make Airtable API requests
+async function makeAirtableRequest(
+  endpoint: string,
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE' = 'GET',
+  data?: any
+) {
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  if (!apiKey) {
+    throw new AirtableAPIError('AIRTABLE_API_KEY environment variable is required');
   }
 
-  private validateField(field: FieldOption): FieldOption {
-    const { type } = field;
+  try {
+    const response = await axios({
+      method,
+      url: `${AIRTABLE_API_BASE}${endpoint}`,
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      data,
+    });
 
-    // Remove options for fields that don't need them
-    if (!fieldRequiresOptions(type as FieldType)) {
-      const { options, ...rest } = field;
-      return rest;
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      const message = error.response?.data?.error?.message || error.message;
+      const statusCode = error.response?.status;
+      throw new AirtableAPIError(message, statusCode, error.response?.data);
     }
+    throw error;
+  }
+}
 
-    // Add default options for fields that require them
-    if (!field.options) {
+// Define available tools
+const TOOLS: Tool[] = [
+  {
+    name: 'list_bases',
+    description: 'List all accessible Airtable bases',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'list_tables',
+    description: 'List all tables in a base',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseId: {
+          type: 'string',
+          description: 'The ID of the base',
+        },
+      },
+      required: ['baseId'],
+    },
+  },
+  {
+    name: 'create_table',
+    description: 'Create a new table with fields',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseId: {
+          type: 'string',
+          description: 'The ID of the base',
+        },
+        name: {
+          type: 'string',
+          description: 'The name of the table',
+        },
+        description: {
+          type: 'string',
+          description: 'The description of the table (optional)',
+        },
+        fields: {
+          type: 'array',
+          description: 'Array of field configurations',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              type: { type: 'string' },
+              options: { type: 'object' }
+            },
+            required: ['name', 'type']
+          }
+        },
+      },
+      required: ['baseId', 'name', 'fields'],
+    },
+  },
+  {
+    name: 'create_field',
+    description: 'Add a new field to a table',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseId: {
+          type: 'string',
+          description: 'The ID of the base',
+        },
+        tableId: {
+          type: 'string',
+          description: 'The ID of the table',
+        },
+        name: {
+          type: 'string',
+          description: 'The name of the field',
+        },
+        type: {
+          type: 'string',
+          description: 'The type of field (singleLineText, multilineText, email, phoneNumber, number, currency, date, singleSelect, multiSelect)',
+        },
+        options: {
+          type: 'object',
+          description: 'Field-specific options (e.g., choices for select fields)',
+        },
+      },
+      required: ['baseId', 'tableId', 'name', 'type'],
+    },
+  },
+  {
+    name: 'list_records',
+    description: 'Retrieve records from a table',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseId: {
+          type: 'string',
+          description: 'The ID of the base',
+        },
+        tableId: {
+          type: 'string',
+          description: 'The ID or name of the table',
+        },
+        maxRecords: {
+          type: 'number',
+          description: 'Maximum number of records to retrieve',
+          default: 100,
+        },
+        view: {
+          type: 'string',
+          description: 'The name or ID of a view to use',
+        },
+        filterByFormula: {
+          type: 'string',
+          description: 'Airtable formula to filter records',
+        },
+        sort: {
+          type: 'array',
+          description: 'Sort configuration',
+          items: {
+            type: 'object',
+            properties: {
+              field: { type: 'string' },
+              direction: { type: 'string', enum: ['asc', 'desc'] }
+            }
+          }
+        },
+      },
+      required: ['baseId', 'tableId'],
+    },
+  },
+  {
+    name: 'create_record',
+    description: 'Create a new record in a table',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseId: {
+          type: 'string',
+          description: 'The ID of the base',
+        },
+        tableId: {
+          type: 'string',
+          description: 'The ID or name of the table',
+        },
+        fields: {
+          type: 'object',
+          description: 'The fields and values for the new record',
+        },
+      },
+      required: ['baseId', 'tableId', 'fields'],
+    },
+  },
+  {
+    name: 'update_record',
+    description: 'Update an existing record',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseId: {
+          type: 'string',
+          description: 'The ID of the base',
+        },
+        tableId: {
+          type: 'string',
+          description: 'The ID or name of the table',
+        },
+        recordId: {
+          type: 'string',
+          description: 'The ID of the record to update',
+        },
+        fields: {
+          type: 'object',
+          description: 'The fields and values to update',
+        },
+      },
+      required: ['baseId', 'tableId', 'recordId', 'fields'],
+    },
+  },
+  {
+    name: 'delete_record',
+    description: 'Delete a record',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseId: {
+          type: 'string',
+          description: 'The ID of the base',
+        },
+        tableId: {
+          type: 'string',
+          description: 'The ID or name of the table',
+        },
+        recordId: {
+          type: 'string',
+          description: 'The ID of the record to delete',
+        },
+      },
+      required: ['baseId', 'tableId', 'recordId'],
+    },
+  },
+  {
+    name: 'search_records',
+    description: 'Find records matching criteria',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseId: {
+          type: 'string',
+          description: 'The ID of the base',
+        },
+        tableId: {
+          type: 'string',
+          description: 'The ID or name of the table',
+        },
+        filterByFormula: {
+          type: 'string',
+          description: 'Airtable formula to filter records',
+        },
+        maxRecords: {
+          type: 'number',
+          description: 'Maximum number of records to return',
+          default: 100,
+        },
+      },
+      required: ['baseId', 'tableId', 'filterByFormula'],
+    },
+  },
+  {
+    name: 'get_record',
+    description: 'Get a single record by its ID',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseId: {
+          type: 'string',
+          description: 'The ID of the base',
+        },
+        tableId: {
+          type: 'string',
+          description: 'The ID or name of the table',
+        },
+        recordId: {
+          type: 'string',
+          description: 'The ID of the record to retrieve',
+        },
+      },
+      required: ['baseId', 'tableId', 'recordId'],
+    },
+  },
+];
+
+// Create and export the MCP server
+export function createAirtableMCPServer() {
+  const server = new Server(
+    {
+      name: 'airtable-mcp-server',
+      version: '0.3.1',
+    },
+    {
+      capabilities: {
+        tools: {},
+      },
+    }
+  );
+
+  // Handle tool listing
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return { tools: TOOLS };
+  });
+
+  // Handle tool calls
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+
+    try {
+      switch (name) {
+        case 'list_bases':
+          // Note: Airtable API doesn't provide endpoint to list bases
+          // This would need to be implemented with base-specific logic
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Airtable API does not provide an endpoint to list bases. You need to specify the base ID directly.',
+              },
+            ],
+          };
+
+        case 'list_tables':
+          const tablesData = await makeAirtableRequest(`/meta/bases/${args.baseId}/tables`);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(tablesData.tables, null, 2),
+              },
+            ],
+          };
+
+        case 'create_table':
+          const newTable = await makeAirtableRequest(
+            `/meta/bases/${args.baseId}/tables`,
+            'POST',
+            {
+              name: args.name,
+              description: args.description,
+              fields: args.fields,
+            }
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Table '${args.name}' created successfully:\n${JSON.stringify(newTable, null, 2)}`,
+              },
+            ],
+          };
+
+        case 'create_field':
+          const newField = await makeAirtableRequest(
+            `/meta/bases/${args.baseId}/tables/${args.tableId}/fields`,
+            'POST',
+            {
+              name: args.name,
+              type: args.type,
+              options: args.options,
+            }
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Field '${args.name}' created successfully:\n${JSON.stringify(newField, null, 2)}`,
+              },
+            ],
+          };
+
+        case 'list_records':
+          const params = new URLSearchParams();
+          if (args.maxRecords) params.append('maxRecords', args.maxRecords.toString());
+          if (args.view) params.append('view', args.view);
+          if (args.filterByFormula) params.append('filterByFormula', args.filterByFormula);
+          if (args.sort) {
+            args.sort.forEach((sortItem: any, index: number) => {
+              params.append(`sort[${index}][field]`, sortItem.field);
+              params.append(`sort[${index}][direction]`, sortItem.direction);
+            });
+          }
+
+          const recordsData = await makeAirtableRequest(
+            `/${args.baseId}/${args.tableId}?${params.toString()}`
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(recordsData.records, null, 2),
+              },
+            ],
+          };
+
+        case 'create_record':
+          const createdRecord = await makeAirtableRequest(
+            `/${args.baseId}/${args.tableId}`,
+            'POST',
+            {
+              fields: args.fields,
+            }
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Record created successfully:\n${JSON.stringify(createdRecord, null, 2)}`,
+              },
+            ],
+          };
+
+        case 'update_record':
+          const updatedRecord = await makeAirtableRequest(
+            `/${args.baseId}/${args.tableId}/${args.recordId}`,
+            'PATCH',
+            {
+              fields: args.fields,
+            }
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Record updated successfully:\n${JSON.stringify(updatedRecord, null, 2)}`,
+              },
+            ],
+          };
+
+        case 'delete_record':
+          await makeAirtableRequest(
+            `/${args.baseId}/${args.tableId}/${args.recordId}`,
+            'DELETE'
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Record ${args.recordId} deleted successfully`,
+              },
+            ],
+          };
+
+        case 'search_records':
+          const searchParams = new URLSearchParams();
+          searchParams.append('filterByFormula', args.filterByFormula);
+          if (args.maxRecords) searchParams.append('maxRecords', args.maxRecords.toString());
+
+          const searchData = await makeAirtableRequest(
+            `/${args.baseId}/${args.tableId}?${searchParams.toString()}`
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(searchData.records, null, 2),
+              },
+            ],
+          };
+
+        case 'get_record':
+          const recordData = await makeAirtableRequest(
+            `/${args.baseId}/${args.tableId}/${args.recordId}`
+          );
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(recordData, null, 2),
+              },
+            ],
+          };
+
+        default:
+          throw new Error(`Unknown tool: ${name}`);
+      }
+    } catch (error) {
+      const errorMessage = error instanceof AirtableAPIError 
+        ? `Airtable API Error (${error.statusCode}): ${error.message}`
+        : `Error: ${error.message}`;
+      
       return {
-        ...field,
-        options: getDefaultOptions(type as FieldType),
+        content: [
+          {
+            type: 'text',
+            text: errorMessage,
+          },
+        ],
+        isError: true,
       };
     }
+  });
 
-    return field;
-  }
-
-  private setupToolHandlers() {
-    // Register available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [
-        {
-          name: "list_bases",
-          description: "List all accessible Airtable bases",
-          inputSchema: {
-            type: "object",
-            properties: {},
-            required: [],
-          },
-        },
-        {
-          name: "list_tables",
-          description: "List all tables in a base",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-            },
-            required: ["base_id"],
-          },
-        },
-        {
-          name: "create_table",
-          description: "Create a new table in a base",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_name: {
-                type: "string",
-                description: "Name of the new table",
-              },
-              description: {
-                type: "string",
-                description: "Description of the table",
-              },
-              fields: {
-                type: "array",
-                description: "Initial fields for the table",
-                items: {
-                  type: "object",
-                  properties: {
-                    name: {
-                      type: "string",
-                      description: "Name of the field",
-                    },
-                    type: {
-                      type: "string",
-                      description: "Type of the field (e.g., singleLineText, multilineText, number, etc.)",
-                    },
-                    description: {
-                      type: "string",
-                      description: "Description of the field",
-                    },
-                    options: {
-                      type: "object",
-                      description: "Field-specific options",
-                    },
-                  },
-                  required: ["name", "type"],
-                },
-              },
-            },
-            required: ["base_id", "table_name"],
-          },
-        },
-        {
-          name: "update_table",
-          description: "Update a table's schema",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_id: {
-                type: "string",
-                description: "ID of the table to update",
-              },
-              name: {
-                type: "string",
-                description: "New name for the table",
-              },
-              description: {
-                type: "string",
-                description: "New description for the table",
-              },
-            },
-            required: ["base_id", "table_id"],
-          },
-        },
-        {
-          name: "create_field",
-          description: "Create a new field in a table",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_id: {
-                type: "string",
-                description: "ID of the table",
-              },
-              field: {
-                type: "object",
-                properties: {
-                  name: {
-                    type: "string",
-                    description: "Name of the field",
-                  },
-                  type: {
-                    type: "string",
-                    description: "Type of the field",
-                  },
-                  description: {
-                    type: "string",
-                    description: "Description of the field",
-                  },
-                  options: {
-                    type: "object",
-                    description: "Field-specific options",
-                  },
-                },
-                required: ["name", "type"],
-              },
-            },
-            required: ["base_id", "table_id", "field"],
-          },
-        },
-        {
-          name: "update_field",
-          description: "Update a field in a table",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_id: {
-                type: "string",
-                description: "ID of the table",
-              },
-              field_id: {
-                type: "string",
-                description: "ID of the field to update",
-              },
-              updates: {
-                type: "object",
-                properties: {
-                  name: {
-                    type: "string",
-                    description: "New name for the field",
-                  },
-                  description: {
-                    type: "string",
-                    description: "New description for the field",
-                  },
-                  options: {
-                    type: "object",
-                    description: "New field-specific options",
-                  },
-                },
-              },
-            },
-            required: ["base_id", "table_id", "field_id", "updates"],
-          },
-        },
-        {
-          name: "list_records",
-          description: "List records in a table",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_name: {
-                type: "string",
-                description: "Name of the table",
-              },
-              max_records: {
-                type: "number",
-                description: "Maximum number of records to return",
-              },
-            },
-            required: ["base_id", "table_name"],
-          },
-        },
-        {
-          name: "create_record",
-          description: "Create a new record in a table",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_name: {
-                type: "string",
-                description: "Name of the table",
-              },
-              fields: {
-                type: "object",
-                description: "Record fields as key-value pairs",
-              },
-            },
-            required: ["base_id", "table_name", "fields"],
-          },
-        },
-        {
-          name: "update_record",
-          description: "Update an existing record in a table",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_name: {
-                type: "string",
-                description: "Name of the table",
-              },
-              record_id: {
-                type: "string",
-                description: "ID of the record to update",
-              },
-              fields: {
-                type: "object",
-                description: "Record fields to update as key-value pairs",
-              },
-            },
-            required: ["base_id", "table_name", "record_id", "fields"],
-          },
-        },
-        {
-          name: "delete_record",
-          description: "Delete a record from a table",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_name: {
-                type: "string",
-                description: "Name of the table",
-              },
-              record_id: {
-                type: "string",
-                description: "ID of the record to delete",
-              },
-            },
-            required: ["base_id", "table_name", "record_id"],
-          },
-        },
-        {
-          name: "search_records",
-          description: "Search for records in a table",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_name: {
-                type: "string",
-                description: "Name of the table",
-              },
-              field_name: {
-                type: "string",
-                description: "Name of the field to search in",
-              },
-              value: {
-                type: "string",
-                description: "Value to search for",
-              },
-            },
-            required: ["base_id", "table_name", "field_name", "value"],
-          },
-        },
-        {
-          name: "get_record",
-          description: "Get a single record by its ID",
-          inputSchema: {
-            type: "object",
-            properties: {
-              base_id: {
-                type: "string",
-                description: "ID of the base",
-              },
-              table_name: {
-                type: "string",
-                description: "Name of the table",
-              },
-              record_id: {
-                type: "string",
-                description: "ID of the record to retrieve",
-              },
-            },
-            required: ["base_id", "table_name", "record_id"],
-          },
-        },
-      ],
-    }));
-
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      try {
-        switch (request.params.name) {
-          case "list_bases": {
-            const response = await this.axiosInstance.get("/meta/bases");
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data.bases, null, 2),
-              }],
-            };
-          }
-
-          case "list_tables": {
-            const { base_id } = request.params.arguments as { base_id: string };
-            const response = await this.axiosInstance.get(`/meta/bases/${base_id}/tables`);
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data.tables, null, 2),
-              }],
-            };
-          }
-
-          case "create_table": {
-            const { base_id, table_name, description, fields } = request.params.arguments as {
-              base_id: string;
-              table_name: string;
-              description?: string;
-              fields?: FieldOption[];
-            };
-            
-            // Validate and prepare fields
-            const validatedFields = fields?.map(field => this.validateField(field));
-            
-            const response = await this.axiosInstance.post(`/meta/bases/${base_id}/tables`, {
-              name: table_name,
-              description,
-              fields: validatedFields,
-            });
-            
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data, null, 2),
-              }],
-            };
-          }
-
-          case "update_table": {
-            const { base_id, table_id, name, description } = request.params.arguments as {
-              base_id: string;
-              table_id: string;
-              name?: string;
-              description?: string;
-            };
-            
-            const response = await this.axiosInstance.patch(`/meta/bases/${base_id}/tables/${table_id}`, {
-              name,
-              description,
-            });
-            
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data, null, 2),
-              }],
-            };
-          }
-
-          case "create_field": {
-            const { base_id, table_id, field } = request.params.arguments as {
-              base_id: string;
-              table_id: string;
-              field: FieldOption;
-            };
-            
-            // Validate field before creation
-            const validatedField = this.validateField(field);
-            
-            const response = await this.axiosInstance.post(
-              `/meta/bases/${base_id}/tables/${table_id}/fields`,
-              validatedField
-            );
-            
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data, null, 2),
-              }],
-            };
-          }
-
-          case "update_field": {
-            const { base_id, table_id, field_id, updates } = request.params.arguments as {
-              base_id: string;
-              table_id: string;
-              field_id: string;
-              updates: Partial<FieldOption>;
-            };
-            
-            const response = await this.axiosInstance.patch(
-              `/meta/bases/${base_id}/tables/${table_id}/fields/${field_id}`,
-              updates
-            );
-            
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data, null, 2),
-              }],
-            };
-          }
-
-          case "list_records": {
-            const { base_id, table_name, max_records } = request.params.arguments as {
-              base_id: string;
-              table_name: string;
-              max_records?: number;
-            };
-            const response = await this.axiosInstance.get(`/${base_id}/${table_name}`, {
-              params: max_records ? { maxRecords: max_records } : undefined,
-            });
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data.records, null, 2),
-              }],
-            };
-          }
-
-          case "create_record": {
-            const { base_id, table_name, fields } = request.params.arguments as {
-              base_id: string;
-              table_name: string;
-              fields: Record<string, any>;
-            };
-            const response = await this.axiosInstance.post(`/${base_id}/${table_name}`, {
-              fields,
-            });
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data, null, 2),
-              }],
-            };
-          }
-
-          case "update_record": {
-            const { base_id, table_name, record_id, fields } = request.params.arguments as {
-              base_id: string;
-              table_name: string;
-              record_id: string;
-              fields: Record<string, any>;
-            };
-            const response = await this.axiosInstance.patch(
-              `/${base_id}/${table_name}/${record_id}`,
-              { fields }
-            );
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data, null, 2),
-              }],
-            };
-          }
-
-          case "delete_record": {
-            const { base_id, table_name, record_id } = request.params.arguments as {
-              base_id: string;
-              table_name: string;
-              record_id: string;
-            };
-            const response = await this.axiosInstance.delete(
-              `/${base_id}/${table_name}/${record_id}`
-            );
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data, null, 2),
-              }],
-            };
-          }
-
-          case "search_records": {
-            const { base_id, table_name, field_name, value } = request.params.arguments as {
-              base_id: string;
-              table_name: string;
-              field_name: string;
-              value: string;
-            };
-            const response = await this.axiosInstance.get(`/${base_id}/${table_name}`, {
-              params: {
-                filterByFormula: `{${field_name}} = "${value}"`,
-              },
-            });
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data.records, null, 2),
-              }],
-            };
-          }
-
-          case "get_record": {
-            const { base_id, table_name, record_id } = request.params.arguments as {
-              base_id: string;
-              table_name: string;
-              record_id: string;
-            };
-            const response = await this.axiosInstance.get(
-              `/${base_id}/${table_name}/${record_id}`
-            );
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response.data, null, 2),
-              }],
-            };
-          }
-
-          default:
-            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
-        }
-      } catch (error) {
-        if (axios.isAxiosError(error)) {
-          throw new McpError(
-            ErrorCode.InternalError,
-            `Airtable API error: ${error.response?.data?.error?.message ?? error.message}`
-          );
-        }
-        throw error;
-      }
-    });
-  }
-
-  async run() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error("Airtable MCP server running on stdio");
-  }
+  return server;
 }
 
-const server = new AirtableServer();
-server.run().catch((error) => {
-  console.error("Server error:", error);
-  process.exit(1);
-});
+// CLI execution (when run directly)
+async function main() {
+  const server = createAirtableMCPServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error('Airtable MCP Server running on stdio');
+}
+
+// Run if this file is called directly
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error('Server error:', error);
+    process.exit(1);
+  });
+}
