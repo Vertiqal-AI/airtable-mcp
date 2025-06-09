@@ -1,3 +1,4 @@
+# Use a Node.js base image
 FROM node:20-alpine
 
 # Set working directory
@@ -7,20 +8,23 @@ WORKDIR /app
 COPY package.json ./
 COPY package-lock.json* ./
 
-# Install dependencies
-RUN npm install
+# Install dependencies with --legacy-peer-deps to handle potential peer dependency issues
+RUN npm install --legacy-peer-deps
 
 # Copy the rest of the application code
 COPY . .
 
+# Copy or create tsconfig.json to ensure proper TypeScript configuration
+COPY tsconfig.json* ./
+
 # Build the TypeScript project
 RUN npm run build
 
-# Expose the port the MCP server will run on (default 8000, configurable via environment variable)
+# Expose the port for the HTTP wrapper
 EXPOSE 8000
 
-# Set environment variable for the port (can be overridden)
-ENV PORT=8000
+# Set environment variable for the port
+ENV PORT=3000
 
 # Command to start the server
 CMD ["npm", "start"]
