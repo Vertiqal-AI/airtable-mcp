@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc && node scripts/post-build.js",
     "prepare": "npm run build",
-    "start": "node build/index.js"
+    "start": "node build/index.js",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"
   },
