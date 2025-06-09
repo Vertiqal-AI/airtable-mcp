@@ -21,7 +21,7 @@ COPY tsconfig.json* ./
 RUN npm run build
 
 # Expose the port for the HTTP wrapper
-EXPOSE 8000
+EXPOSE 3000
 
 # Set environment variable for the port
 ENV PORT=3000
