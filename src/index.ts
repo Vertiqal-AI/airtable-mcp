@@ -12,7 +12,7 @@ import axios, { AxiosInstance } from "axios";
 import { FieldOption, fieldRequiresOptions, getDefaultOptions, FieldType } from "./types.js";
 
 const API_KEY = process.env.AIRTABLE_API_KEY;
-console.log(`✅ AirTable API Key from MCP. It now starts with: ${cleanApiKey.substring(0, 3)}... and ends with: ...${cleanApiKey.slice(-2)}`);
+console.log(`✅ AirTable API Key from MCP. It now starts with: ${API_KEY.substring(0, 3)}... and ends with: ...${cleanApiKey.slice(-2)}`);
  
 if (!API_KEY) {
   throw new Error("AIRTABLE_API_KEY environment variable is required");
