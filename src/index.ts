@@ -11,7 +11,8 @@ import {
 import axios, { AxiosInstance } from "axios";
 import { FieldOption, fieldRequiresOptions, getDefaultOptions, FieldType } from "./types.js";
 
-const API_KEY = process.env.AIRTABLE_API_KEY;
+//const API_KEY = process.env.AIRTABLE_API_KEY;
+const API_KEY = process.argv[2];
 if (!API_KEY) {
   throw new Error("AIRTABLE_API_KEY environment variable is required");
 }
